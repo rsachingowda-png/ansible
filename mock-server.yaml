@@ -21,13 +21,9 @@
             but fake values.
         - role: user
           content: {{ commands }}
-      channelId: "{{ channelId }}"
-      collabPlatform: "TEAMS"
-      workspaceName: "{{ workspaceName }}"
     headers:
       Content-Type: "application/json"
       User-Agent: "servicenow"
-      X-Chatops-Source-Id: "{{ sourceId }}"
-      X-Chatops-Source-Api-Token: "{{ apiToken }}"
+      authorization: "{{ auth }}"
       X-Transaction-Id: "postmessage101"
       dest-id: "chatop"
