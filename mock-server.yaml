@@ -1,1 +1,33 @@
-
+---
+- name: commands check
+  hosts: localhost
+  tasks: 
+  - name: start executing commands
+    shell: echo "Analysing commands."
+    
+- name: notifying from chatops
+  uri:
+    url: https://{{ url }}/v1/chat/completions
+    method: POST
+    body_format: json
+    body:
+      model: "openai/gpt-oss-20b"
+      messages:
+        - role: system
+          content: >
+            You are a monitoring assistant. The user will send a single command
+            such as: health, network, disk, or memory. Respond ONLY with mock JSON
+            data relevant to the command. Do not explain anything. Use realistic
+            but fake values.
+        - role: user
+          content: {{ commands }}
+      channelId: "{{ channelId }}"
+      collabPlatform: "TEAMS"
+      workspaceName: "{{ workspaceName }}"
+    headers:
+      Content-Type: "application/json"
+      User-Agent: "servicenow"
+      X-Chatops-Source-Id: "{{ sourceId }}"
+      X-Chatops-Source-Api-Token: "{{ apiToken }}"
+      X-Transaction-Id: "postmessage101"
+      dest-id: "chatop"
