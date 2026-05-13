@@ -1,185 +1,309 @@
 ---
-- name: System Discovery Playbook
-  hosts: all
-  gather_facts: yes
+###############################################################################
+# Cross Platform Discovery Playbook
+#
+# Features:
+# - Detect OS (Linux/Windows)
+# - Get running applications/processes
+# - Detect Docker
+# - Detect Kubernetes
+# - List running containers
+# - List Kubernetes pods
+# - Non-failing discovery
+# - Works with runtime hostname variable
+#
+# Usage:
+#
+# Extra Vars:
+# hostname: vm004-rh86-03
+#
+###############################################################################
+
+###############################################################################
+# PHASE 1 - BUILD RUNTIME INVENTORY
+###############################################################################
+
+- name: Build runtime inventory
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    runtime_group: runtime_targets
 
   tasks:
 
-    #################################################################
-    # OS DETECTION
-    #################################################################
+    - name: Validate hostname variable
+      fail:
+        msg: "hostname variable is required"
+      when:
+        - hostname is not defined
+        - hostname | length == 0
 
-    - name: Show operating system
+    - name: Add Linux runtime host
+      add_host:
+        name: "{{ hostname }}"
+        groups: "{{ runtime_group }}"
+        ansible_host: "{{ hostname }}"
+        ansible_user: "{{ ansible_user | default('root') }}"
+        ansible_connection: ssh
+      when:
+        - connection_type | default('ssh') == 'ssh'
+
+    - name: Add Windows runtime host
+      add_host:
+        name: "{{ hostname }}"
+        groups: "{{ runtime_group }}"
+        ansible_host: "{{ hostname }}"
+        ansible_user: "{{ ansible_user | default('Administrator') }}"
+        ansible_password: "{{ ansible_password | default(omit) }}"
+        ansible_connection: winrm
+        ansible_winrm_transport: ntlm
+        ansible_winrm_server_cert_validation: ignore
+      when:
+        - connection_type | default('ssh') == 'winrm'
+
+###############################################################################
+# PHASE 2 - DISCOVERY
+###############################################################################
+
+- name: Cross Platform Discovery
+  hosts: runtime_targets
+  gather_facts: false
+  ignore_unreachable: true
+  any_errors_fatal: false
+
+  tasks:
+
+    ###########################################################################
+    # GATHER FACTS
+    ###########################################################################
+
+    - name: Gather Linux facts
+      setup:
+      register: linux_facts
+      failed_when: false
+      changed_when: false
+
+    - name: Gather Windows facts
+      ansible.windows.setup:
+      register: windows_facts
+      failed_when: false
+      changed_when: false
+
+    ###########################################################################
+    # DETECT OS
+    ###########################################################################
+
+    - name: Set OS type
+      set_fact:
+        detected_os: >-
+          {{
+            'Windows'
+            if (ansible_os_family | default('')) == 'Windows'
+            else 'Linux'
+          }}
+
+    - name: Display OS info
       debug:
         msg:
-          - "Hostname: {{ inventory_hostname }}"
-          - "OS Family: {{ ansible_os_family }}"
-          - "Distribution: {{ ansible_distribution | default('N/A') }}"
-          - "Kernel: {{ ansible_kernel }}"
+          hostname: "{{ inventory_hostname }}"
+          os_family: "{{ ansible_os_family | default('UNKNOWN') }}"
+          distribution: "{{ ansible_distribution | default('N/A') }}"
+          kernel: "{{ ansible_kernel | default('N/A') }}"
 
-    #################################################################
-    # LINUX SECTION
-    #################################################################
+    ###########################################################################
+    # LINUX PROCESS DISCOVERY
+    ###########################################################################
 
-    - name: Get running processes on Linux
-      shell: ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -20
+    - name: Get Linux running applications
+      shell: |
+        ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -20
       register: linux_processes
-      when: ansible_os_family != "Windows"
+      failed_when: false
+      changed_when: false
+      when:
+        - detected_os == 'Linux'
 
-    - name: Display Linux processes
+    - name: Show Linux processes
       debug:
         var: linux_processes.stdout_lines
-      when: ansible_os_family != "Windows"
+      when:
+        - detected_os == 'Linux'
 
-    #################################################################
-    # WINDOWS SECTION
-    #################################################################
+    ###########################################################################
+    # WINDOWS PROCESS DISCOVERY
+    ###########################################################################
 
-    - name: Get running processes on Windows
+    - name: Get Windows running applications
       win_shell: |
         Get-Process |
         Sort-Object CPU -Descending |
-        Select-Object -First 20 Name, Id, CPU
+        Select-Object -First 20 Name, Id, CPU |
+        Format-Table -AutoSize
       register: windows_processes
-      when: ansible_os_family == "Windows"
+      failed_when: false
+      changed_when: false
+      when:
+        - detected_os == 'Windows'
 
-    - name: Display Windows processes
+    - name: Show Windows processes
       debug:
         var: windows_processes.stdout_lines
-      when: ansible_os_family == "Windows"
+      when:
+        - detected_os == 'Windows'
 
-    #################################################################
-    # DOCKER DETECTION
-    #################################################################
+    ###########################################################################
+    # DOCKER DETECTION - LINUX
+    ###########################################################################
 
-    - name: Check Docker on Linux
+    - name: Detect Docker on Linux
       shell: docker --version
-      register: docker_check_linux
-      ignore_errors: yes
+      register: docker_linux
+      failed_when: false
       changed_when: false
-      when: ansible_os_family != "Windows"
+      when:
+        - detected_os == 'Linux'
 
-    - name: Check Docker on Windows
+    - name: Show Docker status Linux
+      debug:
+        msg: "{{ docker_linux.stdout }}"
+      when:
+        - detected_os == 'Linux'
+        - docker_linux.rc == 0
+
+    ###########################################################################
+    # DOCKER DETECTION - WINDOWS
+    ###########################################################################
+
+    - name: Detect Docker on Windows
       win_shell: docker --version
-      register: docker_check_windows
-      ignore_errors: yes
+      register: docker_windows
+      failed_when: false
       changed_when: false
-      when: ansible_os_family == "Windows"
-
-    - name: Docker installed (Linux)
-      debug:
-        msg: "Docker is installed: {{ docker_check_linux.stdout }}"
       when:
-        - ansible_os_family != "Windows"
-        - docker_check_linux.rc == 0
+        - detected_os == 'Windows'
 
-    - name: Docker installed (Windows)
+    - name: Show Docker status Windows
       debug:
-        msg: "Docker is installed: {{ docker_check_windows.stdout }}"
+        msg: "{{ docker_windows.stdout }}"
       when:
-        - ansible_os_family == "Windows"
-        - docker_check_windows.rc == 0
+        - detected_os == 'Windows'
+        - docker_windows.rc == 0
 
-    #################################################################
-    # RUNNING DOCKER CONTAINERS
-    #################################################################
+    ###########################################################################
+    # DOCKER CONTAINERS - LINUX
+    ###########################################################################
 
-    - name: Get running Docker containers on Linux
+    - name: Get Linux Docker containers
       shell: docker ps --format "table {{'{{'}}.Names{{'}}'}}\t{{'{{'}}.Image{{'}}'}}\t{{'{{'}}.Status{{'}}'}}"
       register: docker_containers_linux
-      ignore_errors: yes
+      failed_when: false
       changed_when: false
       when:
-        - ansible_os_family != "Windows"
-        - docker_check_linux.rc == 0
+        - detected_os == 'Linux'
+        - docker_linux.rc == 0
 
-    - name: Display Docker containers on Linux
+    - name: Show Linux Docker containers
       debug:
         var: docker_containers_linux.stdout_lines
       when:
-        - ansible_os_family != "Windows"
-        - docker_check_linux.rc == 0
+        - detected_os == 'Linux'
+        - docker_linux.rc == 0
 
-    - name: Get running Docker containers on Windows
+    ###########################################################################
+    # DOCKER CONTAINERS - WINDOWS
+    ###########################################################################
+
+    - name: Get Windows Docker containers
       win_shell: docker ps
       register: docker_containers_windows
-      ignore_errors: yes
+      failed_when: false
       changed_when: false
       when:
-        - ansible_os_family == "Windows"
-        - docker_check_windows.rc == 0
+        - detected_os == 'Windows'
+        - docker_windows.rc == 0
 
-    - name: Display Docker containers on Windows
+    - name: Show Windows Docker containers
       debug:
         var: docker_containers_windows.stdout_lines
       when:
-        - ansible_os_family == "Windows"
-        - docker_check_windows.rc == 0
+        - detected_os == 'Windows'
+        - docker_windows.rc == 0
 
-    #################################################################
-    # KUBERNETES DETECTION
-    #################################################################
+    ###########################################################################
+    # KUBERNETES DETECTION - LINUX
+    ###########################################################################
 
-    - name: Check kubectl on Linux
+    - name: Detect kubectl on Linux
       shell: kubectl version --client
-      register: kubectl_check_linux
-      ignore_errors: yes
+      register: kubectl_linux
+      failed_when: false
       changed_when: false
-      when: ansible_os_family != "Windows"
+      when:
+        - detected_os == 'Linux'
 
-    - name: Check kubectl on Windows
+    - name: Show kubectl status Linux
+      debug:
+        msg: "{{ kubectl_linux.stdout }}"
+      when:
+        - detected_os == 'Linux'
+        - kubectl_linux.rc == 0
+
+    ###########################################################################
+    # KUBERNETES DETECTION - WINDOWS
+    ###########################################################################
+
+    - name: Detect kubectl on Windows
       win_shell: kubectl version --client
-      register: kubectl_check_windows
-      ignore_errors: yes
+      register: kubectl_windows
+      failed_when: false
       changed_when: false
-      when: ansible_os_family == "Windows"
-
-    - name: Kubernetes installed (Linux)
-      debug:
-        msg: "kubectl installed: {{ kubectl_check_linux.stdout }}"
       when:
-        - ansible_os_family != "Windows"
-        - kubectl_check_linux.rc == 0
+        - detected_os == 'Windows'
 
-    - name: Kubernetes installed (Windows)
+    - name: Show kubectl status Windows
       debug:
-        msg: "kubectl installed: {{ kubectl_check_windows.stdout }}"
+        msg: "{{ kubectl_windows.stdout }}"
       when:
-        - ansible_os_family == "Windows"
-        - kubectl_check_windows.rc == 0
+        - detected_os == 'Windows'
+        - kubectl_windows.rc == 0
 
-    #################################################################
-    # KUBERNETES PODS
-    #################################################################
+    ###########################################################################
+    # KUBERNETES PODS - LINUX
+    ###########################################################################
 
-    - name: Get Kubernetes pods on Linux
+    - name: Get Kubernetes pods Linux
       shell: kubectl get pods -A
       register: k8s_pods_linux
-      ignore_errors: yes
+      failed_when: false
       changed_when: false
       when:
-        - ansible_os_family != "Windows"
-        - kubectl_check_linux.rc == 0
+        - detected_os == 'Linux'
+        - kubectl_linux.rc == 0
 
-    - name: Display Kubernetes pods on Linux
+    - name: Show Kubernetes pods Linux
       debug:
         var: k8s_pods_linux.stdout_lines
       when:
-        - ansible_os_family != "Windows"
-        - kubectl_check_linux.rc == 0
+        - detected_os == 'Linux'
+        - kubectl_linux.rc == 0
 
-    - name: Get Kubernetes pods on Windows
+    ###########################################################################
+    # KUBERNETES PODS - WINDOWS
+    ###########################################################################
+
+    - name: Get Kubernetes pods Windows
       win_shell: kubectl get pods -A
       register: k8s_pods_windows
-      ignore_errors: yes
+      failed_when: false
       changed_when: false
       when:
-        - ansible_os_family == "Windows"
-        - kubectl_check_windows.rc == 0
+        - detected_os == 'Windows'
+        - kubectl_windows.rc == 0
 
-    - name: Display Kubernetes pods on Windows
+    - name: Show Kubernetes pods Windows
       debug:
         var: k8s_pods_windows.stdout_lines
       when:
-        - ansible_os_family == "Windows"
-        - kubectl_check_windows.rc == 0
+        - detected_os == 'Windows'
+        - kubectl_windows.rc == 0
