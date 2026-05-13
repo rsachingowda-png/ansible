@@ -1,72 +1,36 @@
 ---
 ###############################################################################
-# Cross Platform Discovery Playbook
-#
-# Features:
-# - Detect OS (Linux/Windows)
-# - Get running applications/processes
-# - Detect Docker
-# - Detect Kubernetes
-# - List running containers
-# - List Kubernetes pods
-# - Non-failing discovery
-# - Works with runtime hostname variable
-#
-# Usage:
-#
-# Extra Vars:
-# hostname: vm004-rh86-03
-#
+# CROSS PLATFORM DISCOVERY PLAYBOOK (ROBUST VERSION)
 ###############################################################################
 
 ###############################################################################
-# PHASE 1 - BUILD RUNTIME INVENTORY
+# PHASE 1 - RUNTIME INVENTORY
 ###############################################################################
 
-- name: Build runtime inventory
+- name: Build runtime host
   hosts: localhost
   gather_facts: false
 
-  vars:
-    runtime_group: runtime_targets
-
   tasks:
 
-    - name: Validate hostname variable
+    - name: Validate hostname
       fail:
         msg: "hostname variable is required"
-      when:
-        - hostname is not defined
-        - hostname | length == 0
+      when: hostname is not defined or hostname | length == 0
 
-    - name: Add Linux runtime host
+    - name: Add runtime host dynamically
       add_host:
         name: "{{ hostname }}"
-        groups: "{{ runtime_group }}"
+        groups: runtime_targets
         ansible_host: "{{ hostname }}"
         ansible_user: "{{ ansible_user | default('root') }}"
         ansible_connection: ssh
-      when:
-        - connection_type | default('ssh') == 'ssh'
-
-    - name: Add Windows runtime host
-      add_host:
-        name: "{{ hostname }}"
-        groups: "{{ runtime_group }}"
-        ansible_host: "{{ hostname }}"
-        ansible_user: "{{ ansible_user | default('Administrator') }}"
-        ansible_password: "{{ ansible_password | default(omit) }}"
-        ansible_connection: winrm
-        ansible_winrm_transport: ntlm
-        ansible_winrm_server_cert_validation: ignore
-      when:
-        - connection_type | default('ssh') == 'winrm'
 
 ###############################################################################
 # PHASE 2 - DISCOVERY
 ###############################################################################
 
-- name: Cross Platform Discovery
+- name: Cross Platform System Discovery
   hosts: runtime_targets
   gather_facts: false
   ignore_unreachable: true
@@ -75,235 +39,146 @@
   tasks:
 
     ###########################################################################
-    # GATHER FACTS
+    # SAFE FACT COLLECTION
     ###########################################################################
 
-    - name: Gather Linux facts
+    - name: Gather system facts safely
       setup:
-      register: linux_facts
+        gather_subset:
+          - min
       failed_when: false
       changed_when: false
 
-    - name: Gather Windows facts
-      ansible.windows.setup:
-      register: windows_facts
-      failed_when: false
-      changed_when: false
-
-    ###########################################################################
-    # DETECT OS
-    ###########################################################################
-
-    - name: Set OS type
+    - name: Detect OS type
       set_fact:
-        detected_os: >-
+        os_type: >-
           {{
-            'Windows'
-            if (ansible_os_family | default('')) == 'Windows'
+            'Windows' if (ansible_os_family | default('')) == 'Windows'
             else 'Linux'
           }}
 
-    - name: Display OS info
+    - name: Show OS info
       debug:
         msg:
-          hostname: "{{ inventory_hostname }}"
-          os_family: "{{ ansible_os_family | default('UNKNOWN') }}"
-          distribution: "{{ ansible_distribution | default('N/A') }}"
-          kernel: "{{ ansible_kernel | default('N/A') }}"
+          host: "{{ inventory_hostname }}"
+          os: "{{ os_type | default('UNKNOWN') }}"
+          family: "{{ ansible_os_family | default('UNKNOWN') }}"
 
     ###########################################################################
     # LINUX PROCESS DISCOVERY
     ###########################################################################
 
-    - name: Get Linux running applications
-      shell: |
-        ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -20
+    - name: Get Linux processes
+      shell: ps -eo pid,comm,%cpu,%mem --sort=-%cpu | head -20
       register: linux_processes
       failed_when: false
       changed_when: false
-      when:
-        - detected_os == 'Linux'
+      when: os_type == 'Linux'
 
     - name: Show Linux processes
       debug:
-        var: linux_processes.stdout_lines
-      when:
-        - detected_os == 'Linux'
+        msg: "{{ linux_processes.stdout_lines | default([]) }}"
+      when: os_type == 'Linux'
 
     ###########################################################################
     # WINDOWS PROCESS DISCOVERY
     ###########################################################################
 
-    - name: Get Windows running applications
+    - name: Get Windows processes
       win_shell: |
         Get-Process |
         Sort-Object CPU -Descending |
-        Select-Object -First 20 Name, Id, CPU |
-        Format-Table -AutoSize
+        Select-Object -First 20 Name, Id, CPU
       register: windows_processes
       failed_when: false
       changed_when: false
-      when:
-        - detected_os == 'Windows'
+      when: os_type == 'Windows'
 
     - name: Show Windows processes
       debug:
-        var: windows_processes.stdout_lines
-      when:
-        - detected_os == 'Windows'
+        msg: "{{ windows_processes.stdout_lines | default([]) }}"
+      when: os_type == 'Windows'
 
     ###########################################################################
-    # DOCKER DETECTION - LINUX
+    # DOCKER DETECTION
     ###########################################################################
 
-    - name: Detect Docker on Linux
+    - name: Check Docker (Linux)
       shell: docker --version
       register: docker_linux
       failed_when: false
       changed_when: false
-      when:
-        - detected_os == 'Linux'
+      when: os_type == 'Linux'
 
-    - name: Show Docker status Linux
+    - name: Show Docker (Linux)
       debug:
-        msg: "{{ docker_linux.stdout }}"
+        msg: "{{ docker_linux.stdout | default('Docker not installed') }}"
       when:
-        - detected_os == 'Linux'
+        - os_type == 'Linux'
+        - docker_linux is defined
+        - docker_linux.rc is defined
         - docker_linux.rc == 0
 
-    ###########################################################################
-    # DOCKER DETECTION - WINDOWS
-    ###########################################################################
-
-    - name: Detect Docker on Windows
-      win_shell: docker --version
-      register: docker_windows
-      failed_when: false
-      changed_when: false
-      when:
-        - detected_os == 'Windows'
-
-    - name: Show Docker status Windows
-      debug:
-        msg: "{{ docker_windows.stdout }}"
-      when:
-        - detected_os == 'Windows'
-        - docker_windows.rc == 0
-
-    ###########################################################################
-    # DOCKER CONTAINERS - LINUX
-    ###########################################################################
-
-    - name: Get Linux Docker containers
+    - name: Get Docker containers (Linux)
       shell: docker ps --format "table {{'{{'}}.Names{{'}}'}}\t{{'{{'}}.Image{{'}}'}}\t{{'{{'}}.Status{{'}}'}}"
       register: docker_containers_linux
       failed_when: false
       changed_when: false
       when:
-        - detected_os == 'Linux'
+        - os_type == 'Linux'
+        - docker_linux is defined
+        - docker_linux.rc is defined
         - docker_linux.rc == 0
 
-    - name: Show Linux Docker containers
+    - name: Show Docker containers (Linux)
       debug:
-        var: docker_containers_linux.stdout_lines
+        msg: "{{ docker_containers_linux.stdout_lines | default([]) }}"
       when:
-        - detected_os == 'Linux'
+        - os_type == 'Linux'
+        - docker_linux is defined
+        - docker_linux.rc is defined
         - docker_linux.rc == 0
 
     ###########################################################################
-    # DOCKER CONTAINERS - WINDOWS
+    # KUBERNETES DETECTION
     ###########################################################################
 
-    - name: Get Windows Docker containers
-      win_shell: docker ps
-      register: docker_containers_windows
-      failed_when: false
-      changed_when: false
-      when:
-        - detected_os == 'Windows'
-        - docker_windows.rc == 0
-
-    - name: Show Windows Docker containers
-      debug:
-        var: docker_containers_windows.stdout_lines
-      when:
-        - detected_os == 'Windows'
-        - docker_windows.rc == 0
-
-    ###########################################################################
-    # KUBERNETES DETECTION - LINUX
-    ###########################################################################
-
-    - name: Detect kubectl on Linux
+    - name: Check kubectl (Linux)
       shell: kubectl version --client
       register: kubectl_linux
       failed_when: false
       changed_when: false
-      when:
-        - detected_os == 'Linux'
+      when: os_type == 'Linux'
 
-    - name: Show kubectl status Linux
+    - name: Show kubectl version
       debug:
-        msg: "{{ kubectl_linux.stdout }}"
+        msg: "{{ kubectl_linux.stdout | default('kubectl not installed') }}"
       when:
-        - detected_os == 'Linux'
+        - os_type == 'Linux'
+        - kubectl_linux is defined
+        - kubectl_linux.rc is defined
         - kubectl_linux.rc == 0
 
-    ###########################################################################
-    # KUBERNETES DETECTION - WINDOWS
-    ###########################################################################
-
-    - name: Detect kubectl on Windows
-      win_shell: kubectl version --client
-      register: kubectl_windows
-      failed_when: false
-      changed_when: false
-      when:
-        - detected_os == 'Windows'
-
-    - name: Show kubectl status Windows
-      debug:
-        msg: "{{ kubectl_windows.stdout }}"
-      when:
-        - detected_os == 'Windows'
-        - kubectl_windows.rc == 0
-
-    ###########################################################################
-    # KUBERNETES PODS - LINUX
-    ###########################################################################
-
-    - name: Get Kubernetes pods Linux
+    - name: Get Kubernetes pods (Linux)
       shell: kubectl get pods -A
       register: k8s_pods_linux
       failed_when: false
       changed_when: false
       when:
-        - detected_os == 'Linux'
+        - os_type == 'Linux'
+        - kubectl_linux is defined
+        - kubectl_linux.rc is defined
         - kubectl_linux.rc == 0
 
-    - name: Show Kubernetes pods Linux
+    - name: Show Kubernetes pods
       debug:
-        var: k8s_pods_linux.stdout_lines
+        msg: "{{ k8s_pods_linux.stdout_lines | default([]) }}"
       when:
-        - detected_os == 'Linux'
+        - os_type == 'Linux'
+        - kubectl_linux is defined
+        - kubectl_linux.rc is defined
         - kubectl_linux.rc == 0
 
-    ###########################################################################
-    # KUBERNETES PODS - WINDOWS
-    ###########################################################################
-
-    - name: Get Kubernetes pods Windows
-      win_shell: kubectl get pods -A
-      register: k8s_pods_windows
-      failed_when: false
-      changed_when: false
-      when:
-        - detected_os == 'Windows'
-        - kubectl_windows.rc == 0
-
-    - name: Show Kubernetes pods Windows
-      debug:
-        var: k8s_pods_windows.stdout_lines
-      when:
-        - detected_os == 'Windows'
-        - kubectl_windows.rc == 0
+###############################################################################
+# END
+###############################################################################
